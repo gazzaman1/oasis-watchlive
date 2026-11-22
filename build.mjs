@@ -72,7 +72,7 @@ async function main(){
     const r=await fetch('https://gazzaman1.github.io/oasis-watchlive/',{cache:'no-store',signal:AbortSignal.timeout(10000)});
     if(!r.ok)throw new Error('Previous page unavailable');return r.text();
   },save:async html=>{await mkdir('public',{recursive:true});await writeFile('public/index.html',html)}});
-  if(process.env.GITHUB_OUTPUT)await appendFile(process.env.GITHUB_OUTPUT,`changed=${result.changed}\n`);
+  if(process.env.GITHUB_OUTPUT)await appendFile(process.env.GITHUB_OUTPUT,`changed=${result.changed}\nvideo_id=${result.id??''}\n`);
   console.log(JSON.stringify(result));
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(e=>{console.error(e.message);process.exitCode=1});
