@@ -1,38 +1,108 @@
 name: Update watchlive
-
 on:
-  workflow_dispatch:          # adds a manual "Run workflow" button
-
+  workflow_dispatch:
+    inputs:
+      verify_only:
+        description: Validate YouTube selection without publishing
+        type: boolean
+        default: false
+      expected_video_id:
+        description: Optional YouTube ID required for a controlled manual run
+        type: string
+        required: false
+  # Independent pre-service safety run; the production cron-job.org schedule is unchanged.
+  schedule:
+    - cron: '22 9 * * 0'
+      timezone: Australia/Brisbane
+  pull_request:
+    paths:
+      - 'build.mjs'
+      - 'artifact-readiness.mjs'
+      - 'verify-published.mjs'
+      - 'test.mjs'
+      - '.github/workflows/watchlive.yml'
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
-
 jobs:
-  build-deploy:
+  pull-request-check:
+    if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - run: node --test test.mjs
+  build-deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      contents: read
+      actions: read
+      pages: write
+      id-token: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-
-      - name: Build page
+      - name: Run deterministic safety tests
+        run: node --test test.mjs
+      - name: Build validated page
+        id: build
         env:
           YT_API_KEY: ${{ secrets.YT_API_KEY }}
         run: node build.mjs
-
+      - name: Check manual publishing guard
+        id: guard
+        env:
+          EXPECTED_ID: ${{ inputs.expected_video_id }}
+          SELECTED_ID: ${{ steps.build.outputs.video_id }}
+          VERIFY_ONLY: ${{ inputs.verify_only }}
+          CHANGED: ${{ steps.build.outputs.changed }}
+        run: |
+          if [[ -n "$EXPECTED_ID" ]] && [[ ! "$EXPECTED_ID" =~ ^[a-zA-Z0-9_-]{11}$ || "$EXPECTED_ID" != "$SELECTED_ID" ]]; then
+            echo "::error::The selected Sunday video did not match the expected public video. Nothing was published."
+            exit 1
+          fi
+          if [[ "$CHANGED" == true && "$VERIFY_ONLY" != true ]]; then
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          fi
       - uses: actions/upload-pages-artifact@v3
+        if: steps.guard.outputs.publish == 'true'
         with:
+          name: pages-${{ github.run_id }}-${{ github.run_attempt }}
           path: ./public
-
+      - name: Bounded read-only artifact readiness check
+        if: steps.guard.outputs.publish == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { waitForArtifact } = await import(`${process.env.GITHUB_WORKSPACE}/artifact-readiness.mjs`);
+            await waitForArtifact(async () => {
+              const r = await github.rest.actions.listWorkflowRunArtifacts({
+                owner: context.repo.owner, repo: context.repo.repo,
+                run_id: context.runId, per_page: 100
+              });
+              return r.data.artifacts;
+            }, `pages-${context.runId}-${process.env.GITHUB_RUN_ATTEMPT}`,
+            ms => new Promise(resolve => setTimeout(resolve, ms)));
       - id: deployment
+        if: steps.guard.outputs.publish == 'true'
         uses: actions/deploy-pages@v4
+        with:
+          artifact_name: pages-${{ github.run_id }}-${{ github.run_attempt }}
+          timeout: 180000
+      - name: Verify published page and parent iframe
+        if: steps.guard.outputs.publish == 'true'
+        run: node verify-published.mjs
